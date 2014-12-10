@@ -521,3 +521,349 @@ The `apply` method on `doRandomStuff` takes an explicit argument of type `T` and
 There are implicit instances of `Case[doRandomStuff.type, T]` for `T` equal to `Int`, `String`, and any `List[X]`, but no instance for `Boolean`.
 
 How does the compiler locate the implicit values for each `T`? Because the singleton type of the `Poly` is a type parameter on `Case`, the implicit scope for `Case` extends to the companion object for `doRandomStuff.type`... which turns out to be `doRandomStuff` itself. In other words, if we're looking for an implicit of type `Case[doRandomStuff.type, Int]`, then `doRandomStuff.caseInt` is implicitly available everywhere in our codebase.
+
+## Generics
+
+HLists are all well and good, but we typically don't want to use them directly in our code. Let's talk about something that links *useful* data types with HLists: `Generics`:
+
+~~~ scala
+scala> case class Foo(num: Int, str: String)
+defined class Foo
+
+scala> val fooGen = Generic[Foo]
+fooGen: shapeless.Generic[Foo]{type Repr = shapeless.::[Int,shapeless.::[String,shapeless.HNil]]} = fresh$macro$5$1@6933ca1
+~~~
+
+The job of a `Generic` is to provide a bidirectional mapping between a "friendly" data type -- in this case `Foo` -- and a generic representation type. The representation type for `Foo` is an `Int :: String :: HNil`. We can convert back and forth between the two types using the `to` and `from` methods on the generic:
+
+~~~ scala
+scala> fooGen.to(Foo(123, "abc"))
+res0: fooGen.Repr = 123 :: abc :: HNil
+
+scala> fooGen.from(res0)
+res1: Foo = Foo(123,abc)
+
+scala> fooGen.from(321 :: res0.tail)
+res2: Foo = Foo(321,abc)
+~~~
+
+This gives us easy data interchange between similar "friendly" data types:
+
+~~~ scala
+scala> case class Foo1(num: Int, str: String)
+defined class Foo1
+
+scala> val fooGen1 = Generic[Foo1]
+fooGen1: shapeless.Generic[Foo1]{type Repr = shapeless.::[Int,shapeless.::[String,shapeless.HNil]]} = fresh$macro$10$1@6cffb4fc
+
+scala> fooGen1.from(fooGen.to(Foo(123, "abc")))
+res3
+~~~
+
+Here's another example. Let's define a mechanism to take any two-element case class and swap the elements:
+
+~~~ scala
+scala> case class Numbers(a: Int, b: Int)
+defined class Numbers
+
+scala> implicit val numGen = Generic[Numbers]
+numGen: shapeless.Generic[Numbers]{type Repr = shapeless.::[Int,shapeless.::[Int,shapeless.HNil]]} = fresh$macro$22$1@297c3f1c
+
+scala> def swap[T, E](value: T)(implicit gen: Generic.Aux[T, E :: E :: HNil]): T = {
+     |   val a :: b :: HNil = gen.to(value)
+     |   gen.from(b :: a :: HNil)
+     | }
+swap: [T, E](value: T)(implicit gen: shapeless.Generic.Aux[T,shapeless.::[E,shapeless.::[E,shapeless.HNil]]])T
+
+scala> swap(Numbers(123, 456))
+res6: Numbers = Numbers(456,123)
+~~~
+
+This works with any case class with two elements of the same type:
+
+~~~ scala
+scala> implicit val strGen = Generic[Strings]
+strGen: shapeless.Generic[Strings]{type Repr = shapeless.::[String,shapeless.::[String,shapeless.HNil]]} = fresh$macro$27$1@eeacb66
+
+scala> swap(Strings("Hello", "world"))
+res7: Strings = Strings(world,Hello)
+~~~
+
+Let's relax things slightly by generalising. Now we'll swap the first two elements in a case class of *n* elements. This will work on any case class with the first two elements the same:
+
+~~~ scala
+scala> def swap2[T, U <: HList, H, T1 <: HList, T2 <: HList](value: T)(
+     |   implicit
+     |     gen: Generic.Aux[T, U],
+     |     isc1: IsHCons.Aux[U, H, T1],
+     |     isc2: IsHCons.Aux[T1, H, T2],
+     |     ev: (H :: H :: T2) =:= U
+     |   ): T = {
+     |   val u = gen.to(value)
+     |   gen.from(u.tail.head :: u.head :: u.tail.tail)
+     | }
+defined swap2
+
+scala> case class Bar(a: Int, b: Int, c: String)
+defined class Bar
+
+scala> implicit val barGen = Generic[Bar]
+barGen: shapeless.Generic[Bar]{type Repr = shapeless.::[Int,shapeless.::[Int,shapeless.::[String,shapeless.HNil]]]} = fresh$macro$34$1@48f19acf
+
+scala> swap2(Bar(1, 2, "3"))
+res8: Bar = Bar(2,1,3)
+
+scala> swap2(Bar(1, 2, "abc"))
+res9: Bar = Bar(2,1,abc)
+~~~
+
+The definition of `swap2` specifies a lot of constraints on the input types `T` and `U` using implicits. TODO: Include notes on the order of implicit resolution and its implications on how we order and design our constraints.
+
+## Generics for Coproducts
+
+shapeless is also able to generate generics for sealed families of case classes:
+
+~~~ scala
+scala> :paste
+// Entering paste mode (ctrl-D to finish)
+
+sealed trait Animal
+final case class Dog(name: String) extends Animal
+final case class Hamster(wheels: Int) extends Animal
+
+
+// Exiting paste mode, now interpreting.
+
+defined trait Animal
+defined class Dog
+defined class Hamster
+
+scala> Generic[Animal]
+res16: shapeless.Generic[Animal]{type Repr = shapeless.:+:[Dog,shapeless.:+:[Hamster,shapeless.CNil]]} = fresh$macro$67$1@2229a060
+~~~
+
+The resulting `Generic` here maps instances of `Animal` to shapeless Coproducts, written `:+:`:
+
+~~~ scala
+scala> def x : Dog :+: Hamster :+: CNil = ???
+x: shapeless.:+:[Dog,shapeless.:+:[Hamster,shapeless.CNil]]
+~~~
+
+The definition of `Coproduct` is similar to the definition of `HList`. It allows us to represent arbitrary disjunctions of types:
+
+~~~ scala
+sealed trait Coproduct
+
+sealed trait :+:[+H, +T <: Coproduct] extends Coproduct
+
+final case class Inl[+H, +T <: Coproduct](head : H) extends :+:[H, T] {
+  override def toString = head.toString
+}
+
+final case class Inr[+H, +T <: Coproduct](tail : T) extends :+:[H, T] {
+  override def toString = tail.toString
+}
+
+sealed trait CNil extends Coproduct
+~~~
+
+Let's see the representations of some animals:
+
+~~~ scala
+scala> animalGen.to(Dog("Sparky"))
+res17: animalGen.Repr = Dog(Sparky)
+
+scala> animalGen.to(Hamster(1))
+res18: animalGen.Repr = Hamster(1)
+
+scala> animalGen.from(res17)
+res19: Animal = Dog(Sparky)
+
+scala> animalGen.from(res18)
+res20: Animal = Hamster(1)
+~~~
+
+TODO: More on coproducts... I don't understand exactly what the values look like, which would undoubtedly help.
+
+### Records and Labelled Generics
+
+Shapeless has a *record* type that allows us to create named representations of data structures:
+
+~~~ scala
+scala> import syntax.singleton._
+import syntax.singleton._
+
+scala> val dog = 'name ->> "Tigger" :: HNil
+dog: shapeless.::[String with shapeless.labelled.KeyTag[Symbol with shapeless.tag.Tagged[String("name")],String],shapeless.HNil] = Tigger :: HNil
+
+scala> import record._
+import record._
+
+scala> dog('name)
+res0: String = Tigger
+~~~
+
+If we specify an invalid symbolic field name, we get a compile error:
+
+~~~ scala
+scala> res2('foo)
+<console>:28: error: No field Symbol with shapeless.tag.Tagged[String("foo")] in record shapeless.::[String with shapeless.labelled.KeyTag[Symbol with shapeless.tag.Tagged[String("name")],String],shapeless.HNil]
+              res2('foo)
+                  ^
+~~~
+
+We can define a `LabelledGeneric` for our `Dog` type that converts instances of that type to records:
+
+~~~ scala
+scala> val lgen = LabelledGeneric[Dog]
+lgen: shapeless.LabelledGeneric[Dog]{type Repr = shapeless.::[String with shapeless.labelled.KeyTag[Symbol with shapeless.tag.Tagged[String("name")],String],shapeless.HNil]} = fresh$macro$7$1@59997770
+
+scala> val ldog = lgen.to(Dog("Sparky"))
+ldog: lgen.Repr = Sparky :: HNil
+
+scala> ldog('name)
+res3: String = Sparky
+~~~
+
+So what's going on here? A record is actually an HList-like data structure that contains type-level representations of field names as well as field values.
+
+This relies on a concept called *singleton types*, which is a Scala thing not a shapeless thing. Here's an example in plain Scala:
+
+~~~ scala
+scala> def sing[T <: String](t: T): Option[t.type] = Some(t)
+sing: [T <: String](t: T)Option[t.type]
+
+scala> sing("foo")
+res5: Option[String("foo")] = Some(foo)
+~~~
+
+Here, the type of the result contains a reference to the singleton type of the string `"foo"`. This is the type shapeless is using when we write `ldog('name)` -- it provides the means to recurse over the record structure at compile time and locate the item tagged with the relevant field name.
+
+## HMaps
+
+shapeless includes an implementation of heterogeneous maps, which associates keys with values provided there is implicit evidence to allow them to be associated:
+
+~~~ scala
+scala> trait AuthRel[K, V]
+defined trait AuthRel
+
+scala> trait OAuth
+defined trait OAuth
+
+scala> trait Basic
+defined trait Basic
+
+scala> case class OUser()
+defined class OUser
+
+scala> case class BUser()
+defined class BUser
+
+scala> implicit val oRel: AuthRel[OAuth, OUser] = new AuthRel[OAuth, OUser] {}
+oRel: AuthRel[OAuth,OUser] = $anon$1@1bbc39bf
+
+scala> implicit val bRel: AuthRel[Basic, BUser] = new AuthRel[Basic, BUser] {}
+bRel: AuthRel[Basic,BUser] = $anon$1@5c8ce934
+
+scala> val o1 = new OAuth {}
+o1: OAuth = $anon$1@74576c13
+
+scala> val b1 = new Basic {}
+b1: Basic = $anon$1@4dce7e7f
+
+scala> val ou1 = OUser()
+ou1: OUser = OUser()
+
+scala> val bu1 = BUser()
+bu1: BUser = BUser()
+
+scala> hm + (o1 -> ou1)
+<console>:35: error: type mismatch;
+ found   : (OAuth, OUser)
+ required: String
+              hm + (o1 -> ou1)
+                       ^
+
+scala> val hm = HMap[AuthRel].empty
+<console>:31: error: value empty is not a member of shapeless.HMapBuilder[AuthRel]
+       val hm = HMap[AuthRel].empty
+                              ^
+
+scala> val hm = HMap.empty[AuthRel]
+hm: shapeless.HMap[AuthRel] = shapeless.HMap@7261ac56
+
+scala> hm + (o1 -> ou1)
+res10: shapeless.HMap[AuthRel] = shapeless.HMap@1d411294
+
+scala> hm + (o1 -> ou1) + (b1 -> bu1)
+res11: shapeless.HMap[AuthRel] = shapeless.HMap@5b84bdad
+
+scala> hm + (o1 -> ou1) + (b1 -> bu1) + (o1 -> bu1)
+<console>:37: error: could not find implicit value for parameter ev: AuthRel[OAuth,BUser]
+              hm + (o1 -> ou1) + (b1 -> bu1) + (o1 -> bu1)
+                                             ^
+
+scala> res10.get(o1)
+res15: Option[OUser] = Some(OUser())
+
+scala> res10.get(b1)
+res17: Option[BUser] = None
+~~~
+
+The map guarantees the type of the result given a particular key, but doesn't guarantee the presence of a value in the map.
+
+## Automatic Type Class Instance Derivation
+
+Big jump here. We're moving from low-level building blocks to a high-level abstraction. In many cases we can mechanically generate type class instances for case classes and sealed families of case classes, provided we already have instances for the leaf types.
+
+Here's an example that auto-generates type classes for scalaz `Monoids`:
+
+~~~ scala
+implicit val monoidInstance: ProductTypeClass[Monoid] = new ProductTypeClass[Monoid] {
+  def emptyProduct = new Monoid[HNil] {
+    def zero = HNil
+    def append(a : HNil, b : HNil) = HNil
+  }
+
+  def product[F, T <: HList](FHead : Monoid[F], FTail : Monoid[T]) = new Monoid[F :: T] {
+    def zero = FHead.zero :: FTail.zero
+    def append(a : F :: T, b : F :: T) = FHead.append(a.head, b.head) :: FTail.append(a.tail, b.tail)
+  }
+
+  def project[F, G](instance : => Monoid[G], to : F => G, from : G => F) = new Monoid[F] {
+    def zero = from(instance.zero)
+    def append(a : F, b : F) = from(instance.append(to(a), to(b)))
+  }
+}
+
+// A pair of arbitrary case classes
+case class Foo(i : Int, s : String)
+case class Bar(b : Boolean, s : String, d : Double)
+
+// Automatically they're monoids ...
+{
+  import Monoid.auto._
+  val f = Foo(13, "foo") |+| Foo(23, "bar")
+  assert(f == Foo(36, "foobar"))
+}
+
+// ... or explicitly
+{
+  implicit val barInstance = Monoid[Bar]
+
+  val b = Bar(true, "foo", 1.0) |+| Bar(false, "bar", 3.0)
+  assert(b == Bar(true, "foobar", 4.0))
+}
+~~~
+
+The three things we need to define are:
+
+ - a type class instance for `HNil`;
+ - a type class instance for `HCons`;
+ - a `project` method that generates a type class instance for a type `F` given an instance
+   for a type `G` and a pair of bidirectional conversion functions.
+
+Monoids are only defined for products (not coproducts). Let's see an example that takes coproducts into account -- generic serialization to/from s-expressions! See `sexp.scala`, which uses a type class called `LabelledTypeClass` to generate a generalized `SexprConvert` type class for products and coproducts. In other words, we get type classes for *all* families of case classes.
+
+TODO: If you try to derive a type class instance for an intermediate type in a type hierarchy, shapeless will issue a warning telling you you may want to switch your code to the supertype. You can add an import to your code (`DeriveConstructors._` ??) to suppress the warning.
+Note:
