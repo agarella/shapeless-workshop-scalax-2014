@@ -866,4 +866,9 @@ The three things we need to define are:
 Monoids are only defined for products (not coproducts). Let's see an example that takes coproducts into account -- generic serialization to/from s-expressions! See `sexp.scala`, which uses a type class called `LabelledTypeClass` to generate a generalized `SexprConvert` type class for products and coproducts. In other words, we get type classes for *all* families of case classes.
 
 TODO: If you try to derive a type class instance for an intermediate type in a type hierarchy, shapeless will issue a warning telling you you may want to switch your code to the supertype. You can add an import to your code (`DeriveConstructors._` ??) to suppress the warning.
-Note:
+
+## Further Reading
+
+[Github!](https://github.com/milessabin/shapeless)
+
+`#shapeless` on Freenode IRC!
